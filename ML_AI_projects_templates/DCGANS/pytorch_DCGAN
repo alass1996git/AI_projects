@@ -1,0 +1,134 @@
+# This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load
+
+# for dataset loading only
+import tensorflow as tf
+#######
+import numpy as np 
+import pandas as pd
+import matplotlib.pyplot as plt
+import PIL
+import os
+import torch
+import torchvision
+from time import time
+from torchvision import datasets, transforms
+from torch import nn, optim
+import torch.nn.functional as F
+
+ngpu = 1
+device = torch.device("cuda:0" if (torch.cuda.is_available() and ngpu > 0) else "cpu")
+print(device)
+# Get the Dataset - This will change based on the dataset at hand
+# load mnist data - simple template
+(train_images, train_labels), (_, _) = tf.keras.datasets.mnist.load_data()
+# reshape the data to fit into the GAN
+train_images = train_images.reshape(train_images.shape[0], 1, 28, 28).astype('float32')
+# Reshape
+train_images = (train_images - 127.5) / 127.5
+
+BUFFER_SIZE = 60000
+BATCH_SIZE = 16
+# Make the datset
+
+labels = torch.ones((BUFFER_SIZE,1))
+train_images = torch.Tensor(train_images)
+print(train_images.shape)
+dataset = torch.utils.data.TensorDataset(train_images, labels)
+
+dl = torch.utils.data.DataLoader(dataset,batch_size=16,shuffle=True)
+class Gen(nn.Module):
+    def __init__(self):
+        super(Gen, self).__init__()
+        self.lin1 = nn.Linear(100,7*7*256)
+        self.bn1 = nn.BatchNorm1d(256*7*7)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.bn3 = nn.BatchNorm2d(64)
+        self.CT1 = nn.ConvTranspose2d(256,128,kernel_size = (5,5),stride=(1,1), padding = 2)
+        self.CT2 = nn.ConvTranspose2d(128,64,kernel_size = (4,4),stride=(2,2), padding = 1)
+        self.CT3 = nn.ConvTranspose2d(64,1,kernel_size = (4,4),stride=(2,2), padding = 1)
+        self.lr = nn.LeakyReLU()
+    def forward(self,x):
+        shaper = x.shape[0]
+        x = self.lin1(x)
+        x = self.lr(self.bn1(x))
+        x = x.view((-1,256,7,7))
+        
+        x = self.CT1(x)
+        x = self.lr(self.bn2(x))
+        x = self.CT2(x)
+        x = self.lr(self.bn3(x))
+        x = self.CT3(x)
+        x = nn.Tanh()(x)
+        return x
+        
+class Disc(nn.Module):
+    def __init__(self):
+        super(Disc, self).__init__()
+        self.conv1 = nn.Conv2d(1,64, kernel_size = (5,5), stride=(2,2), padding = 2)
+        self.conv2 = nn.Conv2d(64,128, kernel_size = (5,5), stride=(2,2), padding = 2)
+        self.lr = nn.LeakyReLU()
+        self.drop = nn.Dropout(p=0.3)
+        self.lin = nn.Linear(128*7*7,1)
+    def forward(self,x):
+        x = self.conv1(x)
+        x = self.drop(self.lr(x))
+        x = self.conv2(x)
+        x = self.drop(self.lr(x))
+        x = torch.flatten(x, start_dim = 1)
+        x = self.lin(x)
+        x = nn.Sigmoid()(x)
+        return x
+    
+
+disc_net = Disc().to(device)
+gen_net = Gen().to(device)
+
+optimizerD = optim.Adam(disc_net.parameters(), lr=1e-4, betas=(0.5, 0.999))
+optimizerG = optim.Adam(gen_net.parameters(), lr=2e-4, betas=(0.5, 0.999))
+
+criterion = nn.BCELoss()
+r_lab = 1
+f_lab = 0
+
+EPOCHS = 5
+for epoch in range(EPOCHS):
+    for i, data in enumerate(dl):
+        #### Discriminator Training
+        # on real
+        
+        disc_net.zero_grad()
+        real_data = data[0].to(device)
+        batch_size = real_data.shape[0]
+        target_ones = torch.ones((batch_size, 1), device=device)
+        target_zeros = torch.zeros((batch_size, 1), device=device)
+        disc_out_real = disc_net(real_data)
+        loss_disc_real = criterion(disc_out_real, target_ones)
+
+        # on fake
+        noise = torch.randn(batch_size, 100, device=device)
+        fake_data = gen_net(noise)
+        disc_out_fake = disc_net(fake_data.detach())
+        loss_disc_fake = criterion(disc_out_fake, target_zeros)
+        loss_disc = (loss_disc_fake + loss_disc_real) / 2.
+        loss_disc.backward()
+        optimizerD.step()
+        
+        ### Generator training
+        gen_net.zero_grad()
+        output = disc_net(fake_data)
+        loss_gen = criterion(output, target_ones)
+        loss_gen.backward()
+        optimizerG.step()
+        
+        fake_data2 = fake_data.cpu().detach().numpy()
+        real_data2 = real_data.cpu().detach().numpy()
+        if i % 25 == 0:
+            print(epoch, float(loss_disc), float(loss_gen))
+            for j in range(fake_data2.shape[0]):
+              plt.subplot(4, 4, j+1)
+              plt.imshow(fake_data2[j, 0,:,:] * 127.5 + 127.5, cmap='gray')
+              plt.axis('off')
+            plt.show()
+
